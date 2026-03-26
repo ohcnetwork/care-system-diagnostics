@@ -1,1 +1,1 @@
-care-system-diagnostics - Care FE Plugin
+care_system_diagnostics - Care FE Plugin

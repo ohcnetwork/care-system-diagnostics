@@ -10,6 +10,12 @@ type QueryParamValue =
 
 type QueryParams = Record<string, QueryParamValue>;
 
+declare global {
+  interface Window {
+    CARE_API_URL: string;
+  }
+}
+
 export enum HttpMethod {
   GET = "GET",
   POST = "POST",

@@ -1,0 +1,1193 @@
+import careConfig from "@/lib/careConfig";
+import { useQuery } from "@tanstack/react-query";
+import { format } from "date-fns";
+import {
+  ActivityIcon,
+  AlertTriangleIcon,
+  CheckCircle2Icon,
+  ClockIcon,
+  DatabaseIcon,
+  FileTextIcon,
+  GlobeIcon,
+  ImageIcon,
+  InfoIcon,
+  LayoutTemplateIcon,
+  MonitorIcon,
+  PlugIcon,
+  PrinterIcon,
+  RefreshCwIcon,
+  ServerIcon,
+  WifiIcon,
+  XCircleIcon,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "@/hooks/useTranslation";
+
+import { cn } from "@/lib/utils";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { Separator } from "@/components/ui/separator";
+
+import { useCareApps } from "@/hooks/useCareApps";
+
+import facilityApi from "@/lib/types/facility/facilityApi";
+
+import { ShortcutBadge } from "@/lib/components/keyboardShortcuts";
+import { query } from "@/lib/request";
+
+type ResourceStatus = "loading" | "success" | "partial" | "error";
+
+interface DiagnosticResult {
+  name: string;
+  status: ResourceStatus;
+  details?: string;
+  duration?: number;
+}
+
+interface NetworkDiagnostics {
+  latency: number | null;
+  apiReachable: boolean;
+  effectiveType?: string;
+  downlink?: number;
+  rtt?: number;
+  downloadSpeed?: number;
+}
+
+interface NetworkInformation {
+  effectiveType?: string;
+  downlink?: number;
+  rtt?: number;
+}
+
+interface NavigatorWithConnection extends Navigator {
+  connection?: NetworkInformation;
+}
+
+interface HealthCheckItem {
+  name: string;
+  title: string;
+  code: number;
+  message: string;
+  latency: number;
+  meta?: Record<string, unknown>;
+}
+
+interface HealthCheckResponse {
+  health: HealthCheckItem[];
+}
+
+function StatusIcon({ status }: { status: ResourceStatus }) {
+  switch (status) {
+    case "success":
+      return <CheckCircle2Icon className="size-5 text-green-600" />;
+    case "partial":
+      return <AlertTriangleIcon className="size-5 text-yellow-600" />;
+    case "error":
+      return <XCircleIcon className="size-5 text-red-600" />;
+    case "loading":
+    default:
+      return <RefreshCwIcon className="size-5 animate-spin text-gray-400" />;
+  }
+}
+
+function statusBadgeVariant(
+  status: ResourceStatus,
+): "green" | "yellow" | "destructive" | "secondary" {
+  switch (status) {
+    case "success":
+      return "green";
+    case "partial":
+      return "yellow";
+    case "error":
+      return "destructive";
+    default:
+      return "secondary";
+  }
+}
+
+function statusLabel(
+  status: ResourceStatus,
+  t: (key: string) => string,
+): string {
+  switch (status) {
+    case "success":
+      return t("checked");
+    case "partial":
+      return t("partial");
+    case "error":
+      return t("failed");
+    default:
+      return t("checking");
+  }
+}
+
+async function checkImageResource(
+  url: string,
+  name: string,
+  t: (key: string) => string,
+): Promise<DiagnosticResult> {
+  const start = performance.now();
+
+  // Try to get file size via a HEAD request in parallel
+  const sizePromise = fetch(url, { method: "HEAD", cache: "no-cache" })
+    .then((resp) => {
+      const cl = resp.headers.get("content-length");
+      return cl ? Number(cl) : null;
+    })
+    .catch(() => null);
+
+  return new Promise<DiagnosticResult>((resolve) => {
+    const img = new Image();
+    img.onload = async () => {
+      const bytes = await sizePromise;
+      const sizeStr = bytes ? formatBytes(bytes) : null;
+      const parts = [`${img.naturalWidth}×${img.naturalHeight}`];
+      if (sizeStr) parts.push(sizeStr);
+      resolve({
+        name,
+        status: "success",
+        details: parts.join(", "),
+        duration: Math.round(performance.now() - start),
+      });
+    };
+    img.onerror = () =>
+      resolve({
+        name,
+        status: "error",
+        details: t("image_failed_to_load"),
+        duration: Math.round(performance.now() - start),
+      });
+    img.src = url;
+  });
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function checkFetchResource(
+  url: string,
+  name: string,
+  t: (key: string) => string,
+): Promise<DiagnosticResult> {
+  const start = performance.now();
+  try {
+    const resp = await fetch(url, { method: "HEAD", cache: "no-cache" });
+    return {
+      name,
+      status: resp.ok ? "success" : "partial",
+      details: `HTTP ${resp.status}`,
+      duration: Math.round(performance.now() - start),
+    };
+  } catch {
+    return {
+      name,
+      status: "error",
+      details: t("network_error"),
+      duration: Math.round(performance.now() - start),
+    };
+  }
+}
+
+async function measureDownloadSpeed(): Promise<number | undefined> {
+  // Download a known static asset and measure throughput
+  const testUrls = ["/manifest.webmanifest", "/robots.txt", "/favicon.ico"];
+
+  try {
+    // Run multiple downloads to get a better average
+    let totalBytes = 0;
+    const start = performance.now();
+
+    for (const url of testUrls) {
+      const cacheBust = `${url}?_speedtest=${Date.now()}`;
+      const resp = await fetch(cacheBust, { cache: "no-store" });
+      if (resp.ok) {
+        const blob = await resp.blob();
+        totalBytes += blob.size;
+      }
+    }
+
+    const durationSec = (performance.now() - start) / 1000;
+
+    if (totalBytes > 0 && durationSec > 0) {
+      // Convert bytes/sec to Mbps (megabits per second)
+      return parseFloat(
+        ((totalBytes * 8) / durationSec / 1_000_000).toFixed(2),
+      );
+    }
+  } catch {
+    // Speed test failed silently
+  }
+  return undefined;
+}
+
+async function measureApiLatency(apiUrl: string): Promise<NetworkDiagnostics> {
+  let latency: number | null = null;
+  let apiReachable = false;
+
+  try {
+    const start = performance.now();
+    const resp = await fetch(apiUrl, { method: "HEAD", cache: "no-cache" });
+    latency = Math.round(performance.now() - start);
+    apiReachable = resp.ok || resp.status === 401 || resp.status === 403;
+  } catch {
+    apiReachable = false;
+  }
+
+  const connection = (navigator as NavigatorWithConnection).connection;
+  const downloadSpeed = await measureDownloadSpeed();
+
+  return {
+    latency,
+    apiReachable,
+    effectiveType: connection?.effectiveType,
+    downlink: connection?.downlink,
+    rtt: connection?.rtt,
+    downloadSpeed,
+  };
+}
+
+export default function SystemDiagnosticsPage({
+  facilityId,
+}: {
+  facilityId: string;
+}) {
+  const { t } = useTranslation();
+  const { apps: careApps, isLoading: _careAppsLoading } = useCareApps();
+  const [runKey, setRunKey] = useState(0);
+  const reportRef = useRef<HTMLDivElement>(null);
+
+  const rerunAll = useCallback(() => setRunKey((k) => k + 1), []);
+
+  const printableResourceChecks = useMemo(
+    () => [
+      {
+        name: t("main_logo"),
+        url: careConfig.mainLogo?.dark ?? "/images/care_logo.svg",
+        type: "image" as const,
+      },
+      {
+        name: t("main_logo_light"),
+        url: careConfig.mainLogo?.light ?? "/images/care_logo.svg",
+        type: "image" as const,
+      },
+      ...(careConfig.stateLogo
+        ? [
+            {
+              name: t("state_logo"),
+              url: careConfig.stateLogo.dark,
+              type: "image" as const,
+            },
+          ]
+        : []),
+      ...(careConfig.customLogo
+        ? [
+            {
+              name: t("custom_logo"),
+              url: careConfig.customLogo.dark,
+              type: "image" as const,
+            },
+          ]
+        : []),
+      {
+        name: t("favicon"),
+        url: "/favicon.ico",
+        type: "fetch" as const,
+      },
+      {
+        name: t("manifest"),
+        url: "/manifest.webmanifest",
+        type: "fetch" as const,
+      },
+    ],
+    // runKey forces recalculation on rerun
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runKey, t],
+  );
+
+  const { data: printResults, isLoading: printLoading } = useQuery({
+    queryKey: ["diagnostics-print", runKey],
+    queryFn: () =>
+      Promise.all(
+        printableResourceChecks.map((r) =>
+          r.type === "image"
+            ? checkImageResource(r.url, r.name, t)
+            : checkFetchResource(r.url, r.name, t),
+        ),
+      ),
+  });
+
+  const { data: networkResult, isLoading: networkLoading } = useQuery({
+    queryKey: ["diagnostics-network", runKey],
+    queryFn: () => measureApiLatency(careConfig.apiUrl),
+  });
+
+  // Backend Health Check
+  const { data: healthResult, isLoading: healthLoading } = useQuery<
+    DiagnosticResult[]
+  >({
+    queryKey: ["diagnostics-health", runKey],
+    queryFn: async (): Promise<DiagnosticResult[]> => {
+      const start = performance.now();
+      try {
+        const resp = await fetch(`${careConfig.apiUrl}/health/`, {
+          method: "GET",
+          cache: "no-cache",
+        });
+        const totalDuration = Math.round(performance.now() - start);
+
+        if (!resp.ok) {
+          return [
+            {
+              name: t("backend_health"),
+              status: "error",
+              details: `HTTP ${resp.status}`,
+              duration: totalDuration,
+            },
+          ];
+        }
+
+        const data = (await resp.json()) as HealthCheckResponse;
+        const results: DiagnosticResult[] = [];
+
+        for (const check of data.health) {
+          // Build details string from API response
+          let details = check.message;
+
+          // Add queue length if present (for Celery queue)
+          if (check.meta?.queue_length !== undefined) {
+            details += ` (Queue: ${check.meta.queue_length})`;
+          }
+
+          results.push({
+            name: check.name,
+            status: check.code === 200 ? "success" : "error",
+            details,
+            duration: Math.round(check.latency * 1000),
+          });
+        }
+
+        return results;
+      } catch (error) {
+        return [
+          {
+            name: t("backend_health"),
+            status: "error",
+            details: error instanceof Error ? error.message : t("check_failed"),
+            duration: Math.round(performance.now() - start),
+          },
+        ];
+      }
+    },
+  });
+
+  const configResults = useMemo<DiagnosticResult[]>(() => {
+    const results: DiagnosticResult[] = [];
+
+    results.push({
+      name: t("api_url"),
+      status: careConfig.apiUrl ? "success" : "error",
+      details: careConfig.apiUrl || t("not_configured"),
+    });
+
+    results.push({
+      name: t("sentry_dsn"),
+      status: careConfig.sentry?.dsn ? "success" : "partial",
+      details: careConfig.sentry?.dsn ? t("configured") : t("not_configured"),
+    });
+
+    results.push({
+      name: t("recaptcha"),
+      status: careConfig.reCaptchaSiteKey ? "success" : "partial",
+      details: careConfig.reCaptchaSiteKey
+        ? t("configured")
+        : t("not_configured"),
+    });
+
+    results.push({
+      name: t("locale_files"),
+      status:
+        careConfig.availableLocales && careConfig.availableLocales.length > 0
+          ? "success"
+          : "partial",
+      details: careConfig.availableLocales?.join(", ") || "en",
+    });
+
+    return results;
+    // runKey forces recalculation on rerun
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runKey, t]);
+
+  const pluginResults = useMemo<DiagnosticResult[]>(() => {
+    if (!careApps || careApps.length === 0) {
+      return [
+        {
+          name: t("plugins"),
+          status: "partial" as const,
+          details: t("no_plugins_loaded"),
+        },
+      ];
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return careApps.map((app: any) => ({
+      name: app.slug,
+      status: "loading" as const,
+      details: app.meta?.url || t("url_not_configured"),
+    }));
+    // runKey forces recalculation on rerun
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [careApps, runKey, t]);
+
+  // Check plugin remote entry accessibility
+  const { data: pluginCheckResults, isLoading: pluginsLoading } = useQuery({
+    queryKey: ["diagnostics-plugins", runKey, pluginResults],
+    queryFn: async () => {
+      if (!careApps || careApps.length === 0) return [];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const checks = careApps.map(async (app: any) => {
+        const url = app.meta?.url;
+        if (!url) {
+          return {
+            name: app.slug,
+            status: "partial" as const,
+            details: t("url_not_configured"),
+          };
+        }
+
+        const start = performance.now();
+        try {
+          const resp = await fetch(url, {
+            method: "HEAD",
+            cache: "no-cache",
+          });
+          const duration = Math.round(performance.now() - start);
+
+          // 200 (OK) or 304 (Not Modified) both indicate plugin is accessible
+          if (resp.ok || resp.status === 304) {
+            return {
+              name: app.slug,
+              status: "success" as const,
+              details: `${url} (HTTP ${resp.status})`,
+              duration,
+            };
+          }
+
+          return {
+            name: app.slug,
+            status: "error" as const,
+            details: `${url} (HTTP ${resp.status})`,
+            duration,
+          };
+        } catch (error) {
+          return {
+            name: app.slug,
+            status: "error" as const,
+            details: `${url} - ${error instanceof Error ? error.message : t("unreachable")}`,
+            duration: Math.round(performance.now() - start),
+          };
+        }
+      });
+
+      return Promise.all(checks);
+    },
+  });
+
+  const mergedPluginResults = useMemo<DiagnosticResult[]>(() => {
+    if (!pluginCheckResults) return pluginResults;
+    return pluginCheckResults;
+  }, [pluginResults, pluginCheckResults]);
+
+  const { data: swResult, isLoading: swLoading } = useQuery({
+    queryKey: ["diagnostics-sw", runKey],
+    queryFn: async (): Promise<DiagnosticResult> => {
+      if (!("serviceWorker" in navigator)) {
+        return {
+          name: t("service_worker"),
+          status: "partial",
+          details: t("not_supported"),
+        };
+      }
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        return {
+          name: t("service_worker"),
+          status: reg ? "success" : "partial",
+          details: reg
+            ? `${t("registered")} (${reg.active ? t("active") : t("waiting")})`
+            : t("not_registered"),
+        };
+      } catch {
+        return {
+          name: t("service_worker"),
+          status: "error",
+          details: t("check_failed"),
+        };
+      }
+    },
+  });
+
+  // Fetch the facility details to get print_templates
+  const { data: facilityData, isLoading: facilityLoading } = useQuery({
+    queryKey: ["diagnostics-facility", facilityId, runKey],
+    queryFn: query(facilityApi.get, {
+      pathParams: { facilityId },
+    }),
+  });
+
+  const printTemplateResults = useMemo<DiagnosticResult[]>(() => {
+    const results: DiagnosticResult[] = [];
+
+    if (!facilityData) return results;
+
+    const templates = Array.isArray(facilityData.print_templates)
+      ? facilityData.print_templates
+      : [];
+
+    if (templates.length === 0) {
+      results.push({
+        name: facilityData.name,
+        status: "partial",
+        details: t("no_templates"),
+      });
+      return results;
+    }
+
+    for (const tmpl of templates) {
+      const prefix = `${facilityData.name} › ${tmpl.slug}`;
+
+      // Check branding header image
+      if (tmpl.branding?.header_image?.url) {
+        results.push({
+          name: `${prefix} — ${t("header_image")}`,
+          status: "loading",
+          details: tmpl.branding.header_image.url,
+        });
+      }
+
+      // Check branding footer image
+      if (tmpl.branding?.footer_image?.url) {
+        results.push({
+          name: `${prefix} — ${t("footer_image")}`,
+          status: "loading",
+          details: tmpl.branding.footer_image.url,
+        });
+      }
+
+      // Check branding logo
+      if (tmpl.branding?.logo?.url) {
+        results.push({
+          name: `${prefix} — ${t("template_logo")}`,
+          status: "loading",
+          details: tmpl.branding.logo.url,
+        });
+      }
+
+      // Page config
+      if (tmpl.page) {
+        const pageDetails = [
+          tmpl.page.size ?? "A4",
+          tmpl.page.orientation ?? "portrait",
+        ].join(", ");
+        results.push({
+          name: `${prefix} — ${t("page_config")}`,
+          status: "success",
+          details: pageDetails,
+        });
+      }
+
+      // Watermark config
+      if (tmpl.watermark) {
+        results.push({
+          name: `${prefix} — ${t("watermark")}`,
+          status: tmpl.watermark.enabled ? "success" : "partial",
+          details: tmpl.watermark.enabled
+            ? `${tmpl.watermark.text ?? ""} (${tmpl.watermark.opacity ?? 0.1})`
+            : t("disabled"),
+        });
+      }
+
+      // Auto-print config
+      if (tmpl.print_setup) {
+        results.push({
+          name: `${prefix} — ${t("auto_print")}`,
+          status: "success",
+          details: tmpl.print_setup.auto_print ? t("enabled") : t("disabled"),
+        });
+      }
+
+      // If template has no branding, page, or watermark at all
+      if (
+        !tmpl.branding &&
+        !tmpl.page &&
+        !tmpl.watermark &&
+        !tmpl.print_setup
+      ) {
+        results.push({
+          name: prefix,
+          status: "partial",
+          details: t("template_unconfigured"),
+        });
+      }
+    }
+
+    return results;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facilityData, runKey, t]);
+
+  // Async image checks for print template branding resources
+  const { data: templateImageResults, isLoading: _templateImagesLoading } =
+    useQuery({
+      queryKey: ["diagnostics-template-images", runKey, printTemplateResults],
+      queryFn: async () => {
+        if (!facilityData) return [];
+        const templates = Array.isArray(facilityData.print_templates)
+          ? facilityData.print_templates
+          : [];
+
+        const allResults: DiagnosticResult[] = [];
+
+        for (const tmpl of templates) {
+          const prefix = `${facilityData.name} › ${tmpl.slug}`;
+          const imageChecks: Promise<DiagnosticResult>[] = [];
+
+          if (tmpl.branding?.header_image?.url) {
+            imageChecks.push(
+              checkImageResource(
+                tmpl.branding.header_image.url,
+                `${prefix} — ${t("header_image")}`,
+                t,
+              ),
+            );
+          }
+          if (tmpl.branding?.footer_image?.url) {
+            imageChecks.push(
+              checkImageResource(
+                tmpl.branding.footer_image.url,
+                `${prefix} — ${t("footer_image")}`,
+                t,
+              ),
+            );
+          }
+          if (tmpl.branding?.logo?.url) {
+            imageChecks.push(
+              checkImageResource(
+                tmpl.branding.logo.url,
+                `${prefix} — ${t("template_logo")}`,
+                t,
+              ),
+            );
+          }
+
+          if (imageChecks.length > 0) {
+            // Load all images for this template in parallel (like PrintPreview does)
+            const totalStart = performance.now();
+            const results = await Promise.all(imageChecks);
+            const totalDuration = Math.round(performance.now() - totalStart);
+            allResults.push(...results);
+
+            // Add a summary row showing total print readiness time for this template
+            const allLoaded = results.every((r) => r.status === "success");
+            allResults.push({
+              name: `${prefix} — ${t("print_ready_time")}`,
+              status: allLoaded ? "success" : "error",
+              details: allLoaded
+                ? t("all_resources_loaded")
+                : t("some_resources_failed"),
+              duration: totalDuration,
+            });
+          }
+        }
+
+        return allResults;
+      },
+      enabled: !facilityLoading && !!facilityData,
+    });
+
+  // Merge image check results with config results for templates
+  const mergedTemplateResults = useMemo<DiagnosticResult[]>(() => {
+    if (!templateImageResults) return printTemplateResults;
+
+    const imageMap = new Map<string, DiagnosticResult>();
+    const extraRows: DiagnosticResult[] = [];
+
+    for (const ir of templateImageResults) {
+      imageMap.set(ir.name, ir);
+    }
+
+    // Replace placeholder entries with real image results
+    const merged = printTemplateResults.map((r) => {
+      const imageResult = imageMap.get(r.name);
+      if (imageResult) {
+        imageMap.delete(r.name);
+        return imageResult;
+      }
+      return r;
+    });
+
+    // Append any extra rows (e.g. print ready time summaries)
+    for (const ir of imageMap.values()) {
+      extraRows.push(ir);
+    }
+
+    return [...merged, ...extraRows];
+  }, [printTemplateResults, templateImageResults]);
+
+  const environmentInfo = useMemo(
+    () => ({
+      userAgent: navigator.userAgent,
+      language: navigator.language,
+      cookiesEnabled: navigator.cookieEnabled,
+      onLine: navigator.onLine,
+      screenResolution: `${screen.width}×${screen.height}`,
+      windowSize: `${window.innerWidth}×${window.innerHeight}`,
+      devicePixelRatio: window.devicePixelRatio,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+    // runKey forces recalculation on rerun
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runKey],
+  );
+
+  const allResults = useMemo(() => {
+    const results: DiagnosticResult[] = [
+      ...(printResults ?? []),
+      ...configResults,
+      ...mergedPluginResults,
+      ...(swResult ? [swResult] : []),
+      ...mergedTemplateResults,
+      ...(healthResult ?? []),
+    ];
+    if (networkResult) {
+      results.push({
+        name: t("api_connectivity"),
+        status: networkResult.apiReachable ? "success" : "error",
+        details: networkResult.latency
+          ? `${networkResult.latency}ms`
+          : t("unreachable"),
+      });
+    }
+    return results;
+  }, [
+    printResults,
+    configResults,
+    mergedPluginResults,
+    swResult,
+    networkResult,
+    mergedTemplateResults,
+    healthResult,
+    t,
+  ]);
+
+  const overallStatus = useMemo<ResourceStatus>(() => {
+    if (allResults.some((r) => r.status === "loading")) return "loading";
+    if (allResults.some((r) => r.status === "error")) return "error";
+    if (allResults.some((r) => r.status === "partial")) return "partial";
+    return "success";
+  }, [allResults]);
+
+  const overallProgress = useMemo(() => {
+    if (allResults.length === 0) return 0;
+    const doneCount = allResults.filter((r) => r.status !== "loading").length;
+    return Math.round((doneCount / allResults.length) * 100);
+  }, [allResults]);
+
+  const isLoading =
+    printLoading ||
+    networkLoading ||
+    swLoading ||
+    facilityLoading ||
+    healthLoading ||
+    pluginsLoading;
+
+  const handlePrint = useCallback(() => {
+    window.print();
+  }, []);
+
+  const [onlineStatus, setOnlineStatus] = useState(navigator.onLine);
+  useEffect(() => {
+    const handleOnline = () => setOnlineStatus(true);
+    const handleOffline = () => setOnlineStatus(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const timestamp = useMemo(() => new Date(), [runKey]);
+
+  return (
+    <div
+      ref={reportRef}
+      id="section-to-print"
+      className="space-y-6 print:space-y-4"
+    >
+      {/* Print-only header */}
+      <div className="hidden print:block mb-6">
+        <div className="flex items-center justify-between border-b border-gray-300 pb-4">
+          <div>
+            <h1 className="text-2xl font-bold">
+              {t("system_diagnostics_report")}
+            </h1>
+            <p className="text-sm text-gray-500">
+              {t("generated_at")}: {format(timestamp, "PPpp")}
+            </p>
+          </div>
+          <img
+            src={careConfig.mainLogo?.dark ?? "/images/care_logo.svg"}
+            alt="CARE Logo"
+            className="h-10 w-auto"
+          />
+        </div>
+      </div>
+
+      {/* Controls bar - hidden when printing */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
+        <div className="flex items-center gap-3">
+          <StatusIcon status={overallStatus} />
+          <div>
+            <h2 className="text-lg font-semibold">{t("overall_status")}</h2>
+            <p className="text-sm text-gray-500">
+              {isLoading ? t("running_checks") : t("checks_complete")}
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={rerunAll} disabled={isLoading}>
+            <RefreshCwIcon
+              className={cn("size-4", isLoading && "animate-spin")}
+            />
+            {t("rerun")}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={handlePrint}
+            data-shortcut-id="print-button"
+          >
+            <PrinterIcon className="size-4" />
+            {t("print_report")}
+            <ShortcutBadge actionId="print-button" />
+          </Button>
+        </div>
+      </div>
+
+      <Progress value={overallProgress} className="h-2" />
+
+      <div className="flex flex-wrap gap-2">
+        <Badge variant={onlineStatus ? "green" : "destructive"}>
+          <WifiIcon className="size-3" />
+          {onlineStatus ? t("online") : t("offline")}
+        </Badge>
+        <Badge variant={statusBadgeVariant(overallStatus)}>
+          <ActivityIcon className="size-3" />
+          {allResults.filter((r) => r.status === "success").length}/
+          {allResults.length} {t("passed")}
+        </Badge>
+        <Badge variant="secondary">
+          <ClockIcon className="size-3" />
+          {format(timestamp, "PPpp")}
+        </Badge>
+      </div>
+
+      <DiagnosticSection
+        icon={<ImageIcon className="size-5" />}
+        title={t("printable_resources")}
+        description={t("printable_resources_desc")}
+      >
+        <ResultsTable results={printResults ?? []} loading={printLoading} />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<LayoutTemplateIcon className="size-5" />}
+        title={t("print_templates")}
+        description={t("print_templates_desc")}
+      >
+        <ResultsTable
+          results={mergedTemplateResults}
+          loading={facilityLoading}
+        />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<GlobeIcon className="size-5" />}
+        title={t("network_diagnostics")}
+        description={t("network_diagnostics_desc")}
+      >
+        {networkLoading ? (
+          <LoadingRows count={3} />
+        ) : networkResult ? (
+          <div className="space-y-3">
+            <ResultRow
+              result={{
+                name: t("api_connectivity"),
+                status: networkResult.apiReachable ? "success" : "error",
+                details: careConfig.apiUrl,
+                duration: networkResult.latency ?? undefined,
+              }}
+            />
+            <ResultRow
+              result={{
+                name: t("api_latency"),
+                status:
+                  networkResult.latency !== null
+                    ? networkResult.latency < 300
+                      ? "success"
+                      : networkResult.latency < 1000
+                        ? "partial"
+                        : "error"
+                    : "error",
+                details: networkResult.latency
+                  ? `${networkResult.latency}ms`
+                  : t("unreachable"),
+              }}
+            />
+            {networkResult.effectiveType && (
+              <ResultRow
+                result={{
+                  name: t("connection_type"),
+                  status:
+                    networkResult.effectiveType === "4g"
+                      ? "success"
+                      : networkResult.effectiveType === "3g"
+                        ? "partial"
+                        : "error",
+                  details: networkResult.effectiveType.toUpperCase(),
+                }}
+              />
+            )}
+            {networkResult.downlink !== undefined && (
+              <ResultRow
+                result={{
+                  name: t("downlink_speed"),
+                  status:
+                    networkResult.downlink >= 5
+                      ? "success"
+                      : networkResult.downlink >= 1
+                        ? "partial"
+                        : "error",
+                  details: `${networkResult.downlink} Mbps`,
+                }}
+              />
+            )}
+            {networkResult.rtt !== undefined && (
+              <ResultRow
+                result={{
+                  name: t("round_trip_time"),
+                  status:
+                    networkResult.rtt < 100
+                      ? "success"
+                      : networkResult.rtt < 300
+                        ? "partial"
+                        : "error",
+                  details: `${networkResult.rtt}ms`,
+                }}
+              />
+            )}
+            <ResultRow
+              result={{
+                name: t("measured_speed"),
+                status:
+                  networkResult.downloadSpeed !== undefined
+                    ? networkResult.downloadSpeed >= 5
+                      ? "success"
+                      : networkResult.downloadSpeed >= 1
+                        ? "partial"
+                        : "error"
+                    : "partial",
+                details:
+                  networkResult.downloadSpeed !== undefined
+                    ? `${networkResult.downloadSpeed} Mbps`
+                    : t("speed_unavailable"),
+              }}
+            />
+          </div>
+        ) : null}
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<PlugIcon className="size-5" />}
+        title={t("plugins_and_apps")}
+        description={t("plugins_and_apps_desc")}
+      >
+        <ResultsTable results={mergedPluginResults} loading={pluginsLoading} />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<DatabaseIcon className="size-5" />}
+        title={t("backend_health")}
+        description={t("backend_health_desc")}
+      >
+        <ResultsTable results={healthResult ?? []} loading={healthLoading} />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<ServerIcon className="size-5" />}
+        title={t("configuration")}
+        description={t("configuration_desc")}
+      >
+        <ResultsTable results={configResults} loading={false} />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<FileTextIcon className="size-5" />}
+        title={t("services")}
+        description={t("services_desc")}
+      >
+        <ResultsTable
+          results={swResult ? [swResult] : []}
+          loading={swLoading}
+        />
+      </DiagnosticSection>
+
+      <DiagnosticSection
+        icon={<MonitorIcon className="size-5" />}
+        title={t("environment")}
+        description={t("environment_desc")}
+      >
+        <div className="grid gap-2 sm:grid-cols-2">
+          {Object.entries(environmentInfo).map(([key, value]) => (
+            <div
+              key={key}
+              className="flex items-start gap-2 rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-sm"
+            >
+              <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-gray-400" />
+              <div className="min-w-0">
+                <span className="font-medium text-gray-700">
+                  {t(`env_${key}`)}
+                </span>
+                <p className="break-all text-gray-500">{String(value)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </DiagnosticSection>
+
+      {/* Print-only footer */}
+      <div className="hidden print:block mt-8 border-t border-gray-300 pt-4">
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>
+            {t("system_diagnostics_report")} &bull; {format(timestamp, "PPpp")}
+          </span>
+          <span>{window.location.origin}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiagnosticSection({
+  icon,
+  title,
+  description,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          {icon}
+          <div>
+            <CardTitle className="text-base">{title}</CardTitle>
+            <CardDescription>{description}</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <Separator />
+      <CardContent className="pt-4">{children}</CardContent>
+    </Card>
+  );
+}
+
+function ResultsTable({
+  results,
+  loading,
+}: {
+  results: DiagnosticResult[];
+  loading: boolean;
+}) {
+  const { t } = useTranslation();
+  if (loading) return <LoadingRows count={3} />;
+  if (results.length === 0) {
+    return (
+      <p className="py-4 text-center text-sm text-gray-400">
+        {t("no_results")}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {results.map((result, i) => (
+        <ResultRow key={`${result.name}-${i}`} result={result} />
+      ))}
+    </div>
+  );
+}
+
+function ResultRow({ result }: { result: DiagnosticResult }) {
+  const { t } = useTranslation();
+  const durationColor =
+    result.duration !== undefined
+      ? result.duration > 2000
+        ? "text-red-500"
+        : result.duration > 500
+          ? "text-yellow-500"
+          : "text-green-500"
+      : "";
+
+  return (
+    <div className="flex items-center justify-between rounded-md border border-gray-100 bg-gray-50 px-3 py-2 print:border-gray-300">
+      <div className="flex items-center gap-2">
+        <StatusIcon status={result.status} />
+        <span className="text-sm font-medium text-gray-800">{result.name}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        {result.duration !== undefined && (
+          <span className={cn("text-xs font-medium", durationColor)}>
+            {`${result.duration}ms`}
+          </span>
+        )}
+        {result.details && (
+          <span className="max-w-50 truncate text-xs text-gray-500">
+            {result.details}
+          </span>
+        )}
+        <Badge variant={statusBadgeVariant(result.status)} size="sm">
+          {statusLabel(result.status, t)}
+        </Badge>
+      </div>
+    </div>
+  );
+}
+
+function LoadingRows({ count }: { count: number }) {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: count }).map((_, i) => (
+        <div
+          key={i}
+          className="flex h-10 animate-pulse items-center rounded-md bg-gray-100"
+        />
+      ))}
+    </div>
+  );
+}

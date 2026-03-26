@@ -1,7 +1,7 @@
 import routes from "./routes";
 
 const manifest = {
-  plugin: "care-system-diagnostics",
+  plugin: "care_system_diagnostics",
   routes,
   extends: [],
   components: {},
