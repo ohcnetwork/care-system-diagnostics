@@ -43,12 +43,8 @@ import {
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-
 import { useCareApps } from "@/hooks/useCareApps";
-
 import facilityApi from "@/lib/types/facility/facilityApi";
-
-import { ShortcutBadge } from "@/lib/components/keyboardShortcuts";
 import { query } from "@/lib/request";
 
 type ResourceStatus = "loading" | "success" | "partial" | "error";
@@ -1037,7 +1033,9 @@ export default function SystemDiagnosticsPage({
           >
             <PrinterIcon className="size-4" />
             {t("print_report")}
-            <ShortcutBadge actionId="print-button" />
+            <span className="flex rounded bg-gray-200 size-5 text-xs text-gray-600 items-center justify-center">
+              P
+            </span>
           </Button>
         </div>
       </div>
@@ -1235,15 +1233,6 @@ export default function SystemDiagnosticsPage({
               )
               .map((result, i) => (
                 <ResultRow key={`mic-${i}`} result={result} />
-              ))}
-            <Separator className="my-2" />
-            {mediaDeviceResults
-              .filter(
-                (r) =>
-                  r.name.startsWith(t("speaker")) || r.name === t("speaker"),
-              )
-              .map((result, i) => (
-                <ResultRow key={`spk-${i}`} result={result} />
               ))}
             {mediaDeviceResults
               .filter((r) => r.name === t("media_permission_denied"))
