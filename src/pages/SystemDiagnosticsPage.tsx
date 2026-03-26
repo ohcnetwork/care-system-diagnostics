@@ -6,6 +6,7 @@ import {
   AlertTriangleIcon,
   CameraIcon,
   CheckCircle2Icon,
+  ChevronLeft,
   ClockIcon,
   DatabaseIcon,
   FileTextIcon,
@@ -1011,6 +1012,14 @@ export default function SystemDiagnosticsPage({
       {/* Controls bar - hidden when printing */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between print:hidden">
         <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            onClick={() => {
+              window.history.back();
+            }}
+          >
+            <ChevronLeft className="size-4 shrink-0" />
+          </Button>
           <StatusIcon status={overallStatus} />
           <div>
             <h2 className="text-lg font-semibold">{t("overall_status")}</h2>
@@ -1031,7 +1040,7 @@ export default function SystemDiagnosticsPage({
             onClick={handlePrint}
             data-shortcut-id="print-button"
           >
-            <PrinterIcon className="size-4" />
+            <PrinterIcon className="size-4 shrink-0" />
             {t("print_report")}
             <span className="flex rounded bg-gray-200 size-5 text-xs text-gray-600 items-center justify-center">
               P
