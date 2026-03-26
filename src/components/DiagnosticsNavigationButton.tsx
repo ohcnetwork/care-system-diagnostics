@@ -1,4 +1,5 @@
 import { Activity } from "lucide-react";
+import { navigate } from "raviger";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/hooks/useTranslation";
 
@@ -24,7 +25,7 @@ export default function DiagnosticsNavigationButton({
   }
 
   const handleClick = () => {
-    window.location.href = `/facility/${id}/settings/diagnostics`;
+    navigate(`/facility/${id}/settings/diagnostics`);
   };
 
   return (

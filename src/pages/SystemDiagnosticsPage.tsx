@@ -1,6 +1,7 @@
 import careConfig from "@/lib/careConfig";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
+import { navigate } from "raviger";
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -47,6 +48,7 @@ import { Separator } from "@/components/ui/separator";
 import { useCareApps } from "@/hooks/useCareApps";
 import facilityApi from "@/lib/types/facility/facilityApi";
 import { query } from "@/lib/request";
+import PageTitle from "@/components/Common/PageHeadTitle";
 
 type ResourceStatus = "loading" | "success" | "partial" | "error";
 
@@ -990,6 +992,7 @@ export default function SystemDiagnosticsPage({
       id="section-to-print"
       className="space-y-6 print:space-y-4"
     >
+      <PageTitle title={t("system_diagnostics")} />
       {/* Print-only header */}
       <div className="hidden print:block mb-6">
         <div className="flex items-center justify-between border-b border-gray-300 pb-4">
@@ -1015,7 +1018,7 @@ export default function SystemDiagnosticsPage({
           <Button
             variant="outline"
             onClick={() => {
-              window.history.back();
+              navigate(`/facility/${facilityId}`);
             }}
             size="icon"
           >
