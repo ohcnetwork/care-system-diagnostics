@@ -1,7 +1,6 @@
 import careConfig from "@/lib/careConfig";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { navigate } from "raviger";
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -1018,7 +1017,7 @@ export default function SystemDiagnosticsPage({
           <Button
             variant="outline"
             onClick={() => {
-              navigate(`/facility/${facilityId}`);
+              history.back();
             }}
             size="icon"
           >
